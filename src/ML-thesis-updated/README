@@ -1,0 +1,54 @@
+Manila Barangay Flood Risk Complete Pipeline (Manuscript Ver. 2)
+
+Notebook: Manila_Barangay_Flood_Risk_Pipeline.ipynb
+(FEATURE_SPEC = "reduced": 8 predictors retained after the correlation/VIF screen.
+Set FEATURE_SPEC = "full" in the decision cell to reproduce the original 11-predictor run.)
+
+Files Needed (Input/)
+
+Because the shape-to-CSV/geospatial processing was completed separately in QGIS, this notebook now requires only tabular inputs:
+
+1. `MetroManila_Barangay_Flood_Area_Validated.csv` — QGIS-prepared flood area and flood percentage table.
+2. `population-dataset-2024.csv` — PSA 2024 barangay population estimates.
+3. `population-dataset-2020.xlsx` — PSA 2020 barangay population table.
+4. `manila_final_base_dataset_NEW.csv` — optional fallback for 2020 population.
+5. `manila_barangay_elevation.csv` — required QGIS Zonal Statistics output containing barangay-level DTM elevation statistics.
+6. `manila_barangay_district_mapping.csv` — district lookup for leave-one-district-out validation
+   (read from backend/app/data/ if not in Input/).
+
+Outputs Produced by the Pipeline (Output/)
+
+Analytical datasets:
+MetroManila_Barangay_Flood_Area_Validated.csv
+manila-city-flood-population_enriched_NEW.csv / .xlsx
+manila_ml_ready_dataset.csv - the 11 candidate predictors and the DPI class target
+
+Dashboard file set (read by the backend):
+barangay_flood_risk_predictions.csv
+best_flood_risk_model_pipeline.joblib - server-side only; never serve to browsers
+model_comparison_results.csv - RF/GB/MLP candidates plus parsimony baselines
+                               (Model_Role, Eligible_For_Selection)
+entropy_component_weights.csv
+feature_importance_gradient_boosting.csv
+feature_importance_random_forest.csv
+permutation_feature_importance.csv
+confusion_matrices.csv - held-out (n = 180) matrices for the 3 candidates, long format
+                         (Model, Actual, Predicted, Count). Not written by the notebook;
+                         restored from its saved cell output and verified by refitting
+                         with the same split and hyperparameters.
+chart_*.png - charts embedded in the backend's comprehensive PDF report
+
+Predictor screen and robustness checks:
+table13_correlation_matrix_11_predictors.csv
+table14_vif_predictors.csv
+predictor_screen_decision.csv
+district_spatial_validation_results.csv - leave-one-district-out metrics
+
+Diagnostics and audits:
+dpi_component_class_summary.csv - summary table by Low/Medium/High
+top_rank_explanation.csv - top 25 explanation table
+high_dpi_medium_flood_audit.csv - explains exposure-driven high ranks
+elevation_outlier_audit.csv - shows elevation anomalies
+population_change_sensitivity_audit.csv - shows robustness checks
+
+The correlation heatmap (figure_correlation_heatmap.png) is kept in reports/figures/.

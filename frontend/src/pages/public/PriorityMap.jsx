@@ -1,0 +1,402 @@
+// Public map of Manila barangays colored by planning priority.
+// App.jsx mounts this at /priority-map. /risk-map redirects here.
+// Barangay rows come from usePublicBarangays (fetchPublicBarangays).
+// Downloads use fetchPublishedExports in publicExportService.
+import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { GeoJSON, MapContainer, ScaleControl, TileLayer } from 'react-leaflet'
+import {
+  BarChart3,
+  ChevronRight,
+  Compass,
+  Download,
+  Home,
+  Info,
+  List,
+  MapPin,
+  Users,
+  Waves,
+} from 'lucide-react'
+import BarangayPhoto from '../../components/shared/BarangayPhoto'
+import { getBarangayPhoto } from '../../data/barangayPhotos'
+import { districtAreaParts } from '../../utils/districtLabel'
+import PublicHeader from '../../components/public/PublicHeader'
+import { DisclaimerReopenButton } from '../../components/public/DisclaimerGate'
+import { riskColors } from '../../theme/colors'
+import { usePublicBarangays } from '../../hooks/usePublicBarangays'
+import { kindLabel, publicExportButtonState, publishedExportsSummary } from '../../utils/publicExports'
+import { fetchPublishedExports, publishedExportDownloadUrl } from '../../services/publicExportService'
+import { CARTO_ATTRIBUTION, CARTO_TILE_URL } from '../../components/public/cartoBasemap'
+import 'leaflet/dist/leaflet.css'
+
+const MANILA_CENTER = [14.5995, 120.9842]
+const MANILA_ZOOM = 13
+
+// Draws outlines from /manila-barangays.geojson. A click selects a name.
+function BoundaryMap({ selectedName, onSelect, riskByName, mapRef }) {
+  const [data, setData] = useState(null)
+
+  useEffect(() => {
+    let active = true
+    fetch('/manila-barangays.geojson')
+      .then((response) => response.json())
+      .then((json) => {
+        if (active) setData(json)
+      })
+      .catch(() => {
+        if (active) setData(null)
+      })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  return (
+    <MapContainer
+      ref={mapRef}
+      center={MANILA_CENTER}
+      zoom={MANILA_ZOOM}
+      className="h-full min-h-[320px] w-full"
+      scrollWheelZoom
+    >
+      <TileLayer
+        attribution={CARTO_ATTRIBUTION}
+        url={CARTO_TILE_URL}
+      />
+      {data ? (
+        <GeoJSON
+          key={`${selectedName || 'all'}-${riskByName.size}`}
+          data={data}
+          style={(feature) => {
+            const name = feature?.properties?.name
+            // fillColor is riskColors for High, Medium, or Low.
+            // A missing level uses the pale token. Stroke is foundation.
+            // The selected name gets a heavier stroke and a stronger fill.
+            const level = riskByName.get(name)
+            return {
+              color: 'var(--color-foundation)',
+              weight: name === selectedName ? 2 : 0.4,
+              fillColor: riskColors[level] || 'var(--color-pale)',
+              fillOpacity: name === selectedName ? 0.9 : 0.55,
+            }
+          }}
+          onEachFeature={(feature, layer) => {
+            layer.on('click', () => onSelect(feature?.properties?.name))
+          }}
+        />
+      ) : null}
+      <ScaleControl position="bottomleft" imperial={false} />
+    </MapContainer>
+  )
+}
+
+// Loads exports an admin has approved, for the download buttons.
+function usePublishedExports() {
+  const [published, setPublished] = useState([])
+  useEffect(() => {
+    let active = true
+    fetchPublishedExports()
+      .then((data) => active && setPublished(data))
+      .catch(() => active && setPublished([]))
+    return () => {
+      active = false
+    }
+  }, [])
+  return published
+}
+
+// Uses the numeric field when the API sent one. Otherwise the fallback.
+function scoreOf(row, key, fallback) {
+  const value = row?.[key]
+  return typeof value === 'number' ? value : fallback
+}
+
+/* Stacked panel: 16/10 capped at 240px, anchored low so the bus stays in frame.
+   Right-hand panel (lg): 5/4 frame, the tallest that keeps the panel short enough at 1280x720. */
+const PHOTO_SLOT_CLASS =
+  'aspect-[16/10] h-auto max-h-[240px] w-full rounded-xl object-cover object-[100%_85%] lg:aspect-[5/4] lg:max-h-none lg:object-[100%_60%]'
+
+// Splits the credit sentence so the source name stays a link.
+function PhotoCredit({ photo }) {
+  const [before, after] = photo.creditText.split(photo.creditLinkText)
+  return (
+    <>
+      {before}
+      <a
+        href={photo.creditUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="underline underline-offset-2 hover:text-foundation"
+      >
+        {photo.creditLinkText}
+      </a>
+      {after}
+    </>
+  )
+}
+
+// One score row. The bar width is the value clamped between 0 and 1.
+function IndicatorRow({ icon: Icon, label, value, barClass }) {
+  const width = `${Math.max(0, Math.min(1, value)) * 100}%`
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between text-sm text-foundation">
+        <span className="inline-flex items-center gap-2 font-medium">
+          <Icon className="h-4 w-4 text-ocean" aria-hidden />
+          {label}
+        </span>
+        <span className="tabular-nums">{value.toFixed(2)}</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-pale/70">
+        <div className={`h-full rounded-full ${barClass}`} style={{ width }} />
+      </div>
+    </div>
+  )
+}
+
+// Filters, map, selected barangay, and the public export links.
+export default function PriorityMap() {
+  const { rows: barangays, loading, error } = usePublicBarangays()
+  const [district, setDistrict] = useState('All Districts')
+  const [barangayName, setBarangayName] = useState('All Barangays')
+  const [map, setMap] = useState(null)
+
+  const districts = useMemo(() => {
+    return [...new Set(barangays.map((row) => row.district).filter(Boolean))].sort()
+  }, [barangays])
+
+  const filtered = useMemo(() => {
+    if (district === 'All Districts') return barangays
+    return barangays.filter((row) => row.district === district)
+  }, [barangays, district])
+
+  const selected = useMemo(() => {
+    if (barangayName !== 'All Barangays') {
+      return filtered.find((row) => row.barangay === barangayName) ?? filtered[0] ?? barangays[0]
+    }
+    return filtered[0] ?? barangays[0]
+  }, [barangayName, filtered, barangays])
+
+  const photo = getBarangayPhoto(selected?.id)
+  const hazard = scoreOf(selected, 'hazard', selected?.dpi ?? 0)
+  const exposure = scoreOf(selected, 'exposure', selected?.dpi ?? 0)
+  const vulnerability = scoreOf(selected, 'vulnerability', selected?.dpi ?? 0)
+
+  const publishedExports = usePublishedExports()
+  const exportButtons = ['csv', 'report'].map((kind) => ({
+    kind,
+    ...publicExportButtonState(publishedExports, kind),
+  }))
+  const anyExportAvailable = exportButtons.some((button) => button.available)
+
+  return (
+    <div className="flex min-h-screen flex-col bg-foundation text-white lg:h-screen lg:overflow-hidden">
+      <PublicHeader />
+
+      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+        <aside className="order-2 flex w-full shrink-0 flex-col gap-4 bg-foundation p-4 lg:order-1 lg:w-80 lg:overflow-y-auto">
+          <h1 className="text-lg font-bold text-white">Barangay Priority Map</h1>
+          {loading ? <p className="text-sm text-pale">Loading priorities…</p> : null}
+          {error ? <p className="text-sm text-pale">{error}</p> : null}
+
+          <label className="block text-sm">
+            <span className="mb-1.5 flex items-center gap-2 font-medium text-pale">
+              <MapPin className="h-4 w-4" aria-hidden />
+              District
+            </span>
+            <select
+              value={district}
+              onChange={(event) => {
+                setDistrict(event.target.value)
+                setBarangayName('All Barangays')
+              }}
+              className="w-full rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-sm text-white"
+            >
+              <option className="text-foundation">All Districts</option>
+              {districts.map((name) => (
+                <option key={name} className="text-foundation">
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="block text-sm">
+            <span className="mb-1.5 flex items-center gap-2 font-medium text-pale">
+              <Users className="h-4 w-4" aria-hidden />
+              Barangay
+            </span>
+            <select
+              value={filtered.some((row) => row.barangay === barangayName) ? barangayName : 'All Barangays'}
+              onChange={(event) => setBarangayName(event.target.value)}
+              className="w-full rounded-lg border border-white/15 bg-white/10 px-3 py-2 text-sm text-white"
+            >
+              <option className="text-foundation">All Barangays</option>
+              {filtered.map((row) => (
+                <option key={row.id ?? row.barangay} className="text-foundation">
+                  {row.barangay}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-pale">
+              Planning Priority (Relative)
+            </p>
+            <ul className="space-y-2 text-sm">
+              <li className="flex items-center gap-2">
+                <span className="h-2.5 w-2.5 rounded-full" style={{ background: riskColors.High }} aria-hidden />
+                High Priority
+              </li>
+              <li className="flex items-center gap-2">
+                <span className="h-2.5 w-2.5 rounded-full" style={{ background: riskColors.Medium }} aria-hidden />
+                Medium Priority
+              </li>
+              <li className="flex items-center gap-2">
+                <span className="h-2.5 w-2.5 rounded-full" style={{ background: riskColors.Low }} aria-hidden />
+                Lower Priority
+              </li>
+            </ul>
+          </div>
+
+          <div className="mt-auto flex gap-2 rounded-lg border border-white/10 bg-white/5 p-3 text-xs text-white/70">
+            <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+            <p>This map supports planning and resource prioritization only. It is not an official warning.</p>
+          </div>
+        </aside>
+
+        <section className="relative order-1 min-h-[320px] flex-1 lg:order-2">
+          <BoundaryMap
+            mapRef={setMap}
+            selectedName={selected?.barangay}
+            riskByName={new Map(barangays.map((row) => [row.barangay, row.riskLevel]))}
+            onSelect={(name) => {
+              if (name) setBarangayName(name)
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => map?.flyTo(MANILA_CENTER, MANILA_ZOOM, { duration: 0.8 })}
+            className="absolute right-3 top-3 z-[500] cursor-pointer rounded-full bg-foundation/90 p-2 text-white transition-colors hover:bg-foundation focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-secondary"
+            aria-label="Reset map to Manila view"
+            title="Reset to Manila view"
+          >
+            <Compass className="h-5 w-5" aria-hidden />
+          </button>
+        </section>
+
+        <aside className="order-3 w-full shrink-0 bg-white p-4 text-foundation lg:w-[22rem] lg:overflow-y-auto">
+          <p className="mb-3 text-sm font-semibold">Selected Barangay</p>
+          {photo ? (
+            <div className="mb-3">
+              <BarangayPhoto
+                imageUrl={photo.src}
+                alt={photo.alt}
+                className={PHOTO_SLOT_CLASS}
+                width={photo.width}
+                height={photo.height}
+                loading="lazy"
+                caption={<PhotoCredit photo={photo} />}
+                reserveCaptionSpace
+              />
+            </div>
+          ) : null}
+          {selected ? (
+            <Link
+              to={`/barangays/${encodeURIComponent(selected.id)}`}
+              className="mb-4 flex items-center justify-between gap-2"
+            >
+              <span className="min-w-0">
+                <span className="block text-lg font-bold">{selected.barangay}</span>
+                <span className="text-sm text-ocean">
+                  {districtAreaParts(selected.district, selected.area).map((part, index) => (
+                    <Fragment key={part}>
+                      {index ? ' ' : null}
+                      <span className="whitespace-nowrap">{part}</span>
+                    </Fragment>
+                  ))}
+                </span>
+              </span>
+              <ChevronRight className="h-5 w-5 shrink-0 text-action" aria-hidden />
+            </Link>
+          ) : null}
+          <div className="space-y-3">
+            <IndicatorRow icon={Waves} label="Hazard" value={hazard} barClass="bg-[var(--risk-high)]" />
+            <IndicatorRow icon={Users} label="Exposure" value={exposure} barClass="bg-[var(--risk-moderate)]" />
+            <IndicatorRow icon={Home} label="Vulnerability" value={vulnerability} barClass="bg-secondary" />
+          </div>
+          <p className="mt-4 flex items-start gap-2 text-xs text-ocean">
+            <BarChart3 className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+            Higher values indicate greater relative need for planning attention.
+          </p>
+        </aside>
+      </div>
+
+      <div className="grid shrink-0 gap-3 border-t border-white/10 bg-foundation p-3 sm:grid-cols-3">
+        <Link
+          to="/compare"
+          className="flex items-center gap-3 rounded-xl bg-slate-800 p-4 text-left transition-colors hover:bg-slate-700"
+        >
+          <BarChart3 className="h-5 w-5 shrink-0" aria-hidden />
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-semibold">Compare Barangays</span>
+            <span className="block text-xs text-white/70">View and contrast indicators across selected areas.</span>
+          </span>
+          <ChevronRight className="h-4 w-4 shrink-0" aria-hidden />
+        </Link>
+        <Link
+          to="/rankings"
+          className="flex items-center gap-3 rounded-xl bg-slate-800 p-4 text-left transition-colors hover:bg-slate-700"
+        >
+          <List className="h-5 w-5 shrink-0" aria-hidden />
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-semibold">Barangay Ranking</span>
+            <span className="block text-xs text-white/70">See the priority ranking across Manila.</span>
+          </span>
+          <ChevronRight className="h-4 w-4 shrink-0" aria-hidden />
+        </Link>
+        <div className="flex flex-col gap-3 rounded-xl bg-slate-800 p-4 text-left">
+          <div className="flex items-center gap-3">
+            <Download className="h-5 w-5 shrink-0" aria-hidden />
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-semibold">Export</span>
+              <span className="block text-xs text-white/70">
+                {anyExportAvailable
+                  ? publishedExportsSummary(publishedExports)
+                  : 'Approved downloads will appear here once published.'}
+              </span>
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {exportButtons.map((button) =>
+              button.available ? (
+                <a
+                  key={button.kind}
+                  href={publishedExportDownloadUrl(button.kind)}
+                  title={button.detail}
+                  className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-medium hover:bg-white/20"
+                >
+                  {button.label}
+                </a>
+              ) : (
+                <button
+                  key={button.kind}
+                  type="button"
+                  disabled
+                  title={button.detail}
+                  className="cursor-not-allowed rounded-lg bg-white/10 px-3 py-1.5 text-xs font-medium opacity-60"
+                >
+                  <span className="font-normal text-white/80">{kindLabel(button.kind)}:</span> {button.label}
+                </button>
+              ),
+            )}
+          </div>
+        </div>
+      </div>
+      <div className="shrink-0 border-t border-white/10 px-4 py-2">
+        <DisclaimerReopenButton className="text-sm font-medium text-pale underline-offset-4 hover:text-white hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--focus-ring)]" />
+      </div>
+    </div>
+  )
+}
